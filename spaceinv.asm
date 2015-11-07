@@ -34,20 +34,22 @@
 ;		 - Modified alienmove routine so that aliens don't advance forward if they're flashing
 ;		 - Edited alienmove routine to create aliens to do not overlap
 ; Nov 5th, 2015	 - Game ends (aliens win) when alien collides with spaceship
+; Nov 6th, 2015  - Ship stalls and flashes when hit by an alien. Alien movement is also halted.
 
 ; TODO
 
-; Spaceship flash effect when alien hits spaceship
 ; Energy packs + Energy usage tracking
 ; Add INTRO to main game
 ; Continuos movement to left and right with one key press
-; Get Insight working (used gdb instead?)
 ; Optimize code
 ; Improve code documentation
-; Move second collision check into move alien routine?
+; Move the second collision check into move alien routine?
+; Add different alien art
+; Check lasercheck shipflash code (will continue incrementing after collision)
 
 ; CURRENT BUGS
 ; Aliens sometimes land unevenly during exit
+; Lower half of screen flashes when terminal height and width increased
 
 ; FIXED BUGS
 ; Problem: Sometimes laser goes through alien.
@@ -92,13 +94,14 @@
 
 
 ; Dimensions of the screen and playing area
+; Adjust these to play on a larger terminal (ex: 132 x 43)
 %define TERMWIDTH	80				; Console terminal width = 80. 
 %define HEIGHT		24				; Console terminal height = 24.
 %define BOTTOMROW	'24'
 
 ; Starting Coordinates
 %define CENTERROW	HEIGHT / 2							; Calculate center row to display messages to user
-%define SHIPSTART	(TERMWIDTH * 18) + (TERMWIDTH / 2)				; Ship starting point
+%define SHIPSTART	(TERMWIDTH * (HEIGHT - (SHIPHEIGHT + 1) ) ) + (TERMWIDTH / 2)	; Ship starting point. +1 for status bar
 %define SHIPMAXRIGHT	SHIPSTART + (TERMWIDTH / 2) - 5					; Define max left and right to prevent ship from going out of bounds
 %define SHIPMAXLEFT	SHIPSTART - (TERMWIDTH / 2) + 3					; 
 
@@ -114,6 +117,10 @@
 %define	ALIENPADDING	1							; Padding to be added to starting position
 										; Prevents characters in second line from being cut off 
 %define UNDERALIEN	(ALIENHEIGHT * TERMWIDTH) - ALIENPADDING		; Calculates the first element of space below alien
+
+; Ship Data
+%define SHIPHEIGHT	5							; Ship's height, in rows
+%define SHIPWIDTH	8							; Ship's width, in columns	
 
 section .data						; Initialised data
 
@@ -184,7 +191,7 @@ ALIEN3LEN:		equ $-alien3
 ; The table used to translate direction bitflags to ASCII characters
 ; line-drawing characters
 ; vtlines:	db	' xqmxxltqjqvkuwn'
-asciilines:	db	' |-*||**-*-*****'
+; asciilines:	db	' |-*||**-*-*****'
 
 ; The structure passed to the sigaction system call.
 sigact:		dd	tick				; 'tick' label is located in the refresh procedure
@@ -214,10 +221,17 @@ timer:		resd 4
 scr:		resb TERMWIDTH * HEIGHT
 
 ; Buffer to store program's output, which is written to standard output
-outbuf:		resb 4096
+; 8192 allows for larger terminal windows (ex: 132 x 43 )
+outbuf:		resb 8192;4096
 
 ; Ship coordinates
 ship:		resd 1
+
+; Flag set when ship hit by alien
+shipflash:	resd 1
+
+; Amount of time ship will flash before ending game
+shipflashtimer:	resd 1
 
 ; Laser coordinates
 laser:		resd 1
@@ -352,7 +366,7 @@ lasercheck:
 		ret						; Only space, return to caller
 ; Is it a laser?
 .hit:		cmp	bl, [laserchar]				; Was it hit by a laser?
-		jnz	alienswin				; No? Then it collided with spaceship. End game.
+		jnz	.shiphit				; No? Then it collided with spaceship. Set ship flash flag.
 								; Otherwise, process destroy alien instructions
 		mov	dword [laser], NULL			; Erase laser
 		inc	dword [score]				; Increment the score
@@ -366,7 +380,9 @@ lasercheck:
 		mov	eax, [score]				; Copy value of score into EAX
 		cmp	eax, MAXSCORE				; Compare it to MAXSCORE
 		jge	playerwins				; Jump to playerwins instructions if max score has been reached
-		ret						; Otherwise, return to caller
+		jmp	.return					; Otherwise, return to caller
+.shiphit	inc	dword [shipflash]			; Set the shipflash flag
+.return		ret						; Return to caller
 
 		
 		
@@ -420,6 +436,41 @@ flashalien:
 .draw		call	drawaliens				; ECX holds index into alien table
 .doloop		loop	.flashloop	
 		ret						; Return to caller
+		
+; Description:
+; This routine checks if the ship should flash.
+; The flashship variable will be set to a non-zero when it collides with an alien
+;
+; Input: 
+;
+; Output:
+;
+; are altered
+flashship:
+		mov	ebx, shipflash				; Copy address of the shipflash flag variable into EBX
+		cmp	[ebx], dword NULL			; Is it zero?
+		jz	.draw					; If so, draw the alien normally
+								; Otherwise, alien should flash
+								
+		mov	ebx, shipflashtimer			; Copy address of alienflashtimer table into EBX
+		cmp	[ebx], dword 100			; Compare it to 25 (create constant SHIPFLASHTIMER)
+		jge	.endflashing				; If greater or equal, jump to .endflashing and end the game (aliens win)
+								; Otherwise, check if it's time to flash
+		xor	eax, eax				; Zero EAX register
+		add	eax, [ebx]				; Add timer to ebx
+		jp	.flashdraw				; If parity flag set, draw alien
+		jmp	.noflash				; Otherwise, don't draw (flash effect)
+		
+.flashdraw	call	drawship
+		inc	dword [ebx]				; Increment the flash timer
+		jmp	.finish
+.noflash	inc	dword [ebx]
+		jmp	.finish
+.endflashing	mov	[ebx], dword NULL			; Flashing complete. Reset alien's flash timer
+		jmp	alienswin				; Process remaining aliens
+
+.draw		call	drawship				; ECX holds index into alien table
+.finish		ret		
 		
 ; Description:
 ; Erase screen buffer in preparation for a new frame
@@ -758,7 +809,7 @@ _start:
 		mov     ecx, sigact				; Move address of sigact into ECX (sigact points to ret instruction)
 		int	0x80					; Perform system call
 		mov	ecx, timer				; Load address of timer structure into ECX
-		mov	eax, 25 * 1000				; Load the result of 50 * 1000 into EAX (0.05 seconds for fast lasers)
+		mov	eax, 25 * 1000				; Load the result of 25 * 1000 into EAX (0.025 seconds for fast lasers)
 		mov	[byte ecx + 4], eax			; Copy the result into the 4th byte of timer
 		mov	[byte ecx + 12], eax			; And copy the result into the 12th byte of timer
 		cdq						; Convert double word to quad word. EDX:EAX
@@ -855,6 +906,10 @@ mainloop:
 ;# moveSHIP								##
 ;#########################################################################
 ; The keystroke is retrieved, and, if appropriate, the program moves the ship left or right.
+
+; First, check if the ship has been hit. If so, prevent it from moving
+		cmp	dword [shipflash], 0			; See if the shipflash flag is still zero
+		jnz	.endturn				; If not, do not let the player move
 
 		mov	al, [key]				; Copy the current key into AL
 		cmp	al, '4'					; Check if it's the digit '4'
@@ -961,7 +1016,11 @@ mainloop:
 collcheck1:	call	lasercheck
 	
 		
-; Check if it's time for the aliens to move forward (based on timer)
+; First, check if the ship has been hit
+		cmp	dword [shipflash], NULL			; Has the ship been hit?
+		jnz	.shipflashing				; If so, don't move the aliens
+		
+; Check if it's time for the aliens to move forward (based on timer)	
 .advancecheck:	cmp	[timerctl], byte ALIENSPEED		; Check if the aliens should advance or wait for another 
 								; signal alarm from the operating system (this paces the attack)
 		jl	.finishalien				; If not, skip the routine and increment timerctl
@@ -992,6 +1051,7 @@ collcheck1:	call	lasercheck
 
 		
 .finishalien:	inc	byte [timerctl]				; Increment the timer control value
+.shipflashing:
 
 ; Collision check #2
 ; After alien moves
@@ -1009,16 +1069,19 @@ collcheck2:	call	lasercheck
 		jz	.fire					; If so, see if user fired
 ; Check if the laser will pass into outer space. If not, advance it. Otherwise, clear it.
 .advance:	
-		sub	eax, byte TERMWIDTH			; Subract width to move laser up one row
+		sub	eax, dword TERMWIDTH			; Subract width to move laser up one row
 		js	.clear					; Check if laser has passed the top row to outerspace. If so, erase it
 								; (JS = Jump if Sign flag set) 
 		mov	[laser], eax				; Copy new value into laser
 		jmp	.finishlaser				; Do not fire if laser already exists, instead jump to .finishlaser
-.fire:		mov	dl, [key]				; Retrieve current keystroke
+.fire:		; Check if the ship has been hit
+		cmp	dword [shipflash], NULL			; Ship flash flag been set?
+		jnz	.finishlaser				; If so, do not allow player to fire laser
+		mov	dl, [key]				; Retrieve current keystroke
 		cmp	dl, ' '					; Check if user pressed the spacebar
 		jnz	.finishlaser				; If not, just move on
 		mov	ecx, [ship]				; Otherwise, move ship's coordinates into ECX
-		sub	ecx, byte TERMWIDTH			; Subract one row
+		sub	ecx, dword TERMWIDTH			; Subract one row
 		mov	[laser], ecx				; Position laser
 		jmp 	.finishlaser				; END
 .clear:  	mov	dword [laser], 0			; Nullify laser
@@ -1029,7 +1092,7 @@ collcheck2:	call	lasercheck
 ;#########################################################################
 ; The screen buffer is erased and then all components of the game are then drawn to it
 		call	erasescr				; Erase screen buffer
-		call	drawship				; Draw ship
+		call	flashship				; Draw ship
 		call	flashalien				; See if an alien should flash. If not, draw them normally.
 		call	drawlaser				; Draw laser
 		call 	drawscore				; Draw scoreboard
