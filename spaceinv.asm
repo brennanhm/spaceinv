@@ -4,7 +4,7 @@
 ;  Name		   : ASCII Space Invaders
 ;  Version         : 1.0
 ;  Creation date   : Oct 7th, 2015
-;  Last update     : Nov 5th, 2015
+;  Last update     : Nov 10th, 2015
 ;  Author          : brennanhm
 ;  Description     : The Martians are invading and we need YOU to save planet Earth!
 ;		     Program designed to run in Linux on a 32bit x86 processor
@@ -27,7 +27,7 @@
 ;		 - Added playerwins exit routine to display congratulations message
 ;		 - Changed SIG Alarm timer to (25 * 1000) from (50 * 1000) to increase speed of gameplay
 ; Oct 29th, 2015 - Increased # of aliens from one to three
-; Nov 2nd, 2015	 - Changed alienloop variable to resd from resb to prevent crashes in the moveAlien routine. Used gdb to determine ECX counter sometimes reached 65000+ causing segmentation fault.
+; Nov 2nd, 2015	 - Changed aliencounter variable to resd from resb to prevent crashes in the moveAlien routine. Used gdb to determine ECX counter sometimes reached 65000+ causing segmentation fault.
 ;		 - Score determines number of aliens on screen. Currently using LEVEL1, LEVEL2, and LEVEL3 constants to test score value.
 ;		 - Added flash effect when aliens are hit by laser
 ; Nov 3rd, 2015  - Modified lasercheck routine so that laser hits are not registered when alien is disintegrating (flashing)
@@ -35,111 +35,142 @@
 ;		 - Edited alienmove routine to create aliens to do not overlap
 ; Nov 5th, 2015	 - Game ends (aliens win) when alien collides with spaceship
 ; Nov 6th, 2015  - Ship stalls and flashes when hit by an alien. Alien movement is also halted.
+; Nov 10th, 2015 - Incorporated intro, which contains instructions, into the main program. 
 
 ; TODO
 
 ; Energy packs + Energy usage tracking
-; Add INTRO to main game
 ; Continuos movement to left and right with one key press
 ; Optimize code
 ; Improve code documentation
 ; Move the second collision check into move alien routine?
 ; Add different alien art
 ; Check lasercheck shipflash code (will continue incrementing after collision)
+; 'Any key' does not include ctrl, shift, or alt
 
 ; CURRENT BUGS
-; Aliens sometimes land unevenly during exit
 ; Lower half of screen flashes when terminal height and width increased
 
 ; FIXED BUGS
+;
 ; Problem: Sometimes laser goes through alien.
 ; Cause: Need to check for collision before and after alien moves
 ; Problem: Alien destroyed when landing above score
 ; Cause: Alien only checking for non-space before moving. Specifically check for laser now.
+;
+; Nov 10th, 2015
+; Problem: Aliens sometimes land unevently during exit
+; Cause: Loop exits before all aliens advance. 
+; Solution: Set an alienwin flag instead and check if after loop.
 
-; System calls used by this program
+;#########################################################################
+;# Macros / Constants							##
+;#########################################################################
 
-%define	SC_read		3		; EAX = read(ebx, ecx, edx)
-%define SC_write	4		; EAX = write(ebx, ecx, edx)
-%define SC_pause	29		; EAX = pause()
-%define SC_ioctl	54		; EAX = ioctl(ebc, ecx, edx)
-%define SC_sigaction	67		; EAX = sigaction(ebx, ecx, edx)
-%define	SC_gettimeofday 78		; EAX = gettimeofday(ebx, ecx)
-%define SC_setitimer	104		; EAX = setitimer(ebx, ecx, edx)
-%define SC_select	142		; EAX = select(ebx, ecx, edx, esi, edi)
+; Linux system calls used by this program
+; http://syscalls.kernelgrok.com/ for details
 
-; ioctl values
+%define	SC_read		3				; EAX = read(ebx, ecx, edx)
+%define SC_write	4				; EAX = write(ebx, ecx, edx)
+%define SC_pause	29				; EAX = pause()
+%define SC_ioctl	54				; EAX = ioctl(ebc, ecx, edx)
+%define SC_sigaction	67				; EAX = sigaction(ebx, ecx, edx)
+%define	SC_gettimeofday 78				; EAX = gettimeofday(ebx, ecx)
+%define SC_setitimer	104				; EAX = setitimer(ebx, ecx, edx)
+%define SC_select	142				; EAX = select(ebx, ecx, edx, esi, edi)
 
-%define TCGETS		0x5401		; Get console settings
-%define TCSETS		0x5402		; Set console settings
-%define ICANON		0000002		; Canonical mode
-%define ECHO		0000010		; Echo mode
+; ioctl ( input/output control) values
 
-; Signal values
+%define TCGETS		0x5401				; Get console settings
+%define TCSETS		0x5402				; Set console settings
+%define ICANON		0000002				; Canonical mode
+%define ECHO		0000010				; Echo mode
+
+; Linux signal values
 
 %define SIGALRM		14
 
 ; ASCII character codes for terminal manipulation ('q' = NASM octal notation)
-%define SI		017q		; Shift In
-%define ESC		033q		; Escape
-%define SO		016q		; Shift Out
+%define SI		017q				; Shift In
+%define ESC		033q				; Escape
+%define SO		016q				; Shift Out
 
-%define NULL		0				; Define NULL
+; Game constants
+
+%define INTROSPEED	60				; Speed at which stars move in intro screen (lower is faster)
+%define GAMESPEED	25				; Speed setting for main game (lower is faster)
+%define NULL		0				; Define NULL as zero
+%define NONZERO		1				; Define NONZERO as one
 %define MAXSCORE	99				; Game exits when this score is reached
-; As the player's score increases, the number of aliens does as well
 %define LEVEL1		5				; Level 1 until score reaches 5
 %define LEVEL2		15				; Level 2 until score reaches 15
 %define LEVEL3		50				; Level 3 until score reaches 50
 %define LEVEL4		75				; Level 4 until score reaches 75						
-
-
 ; Dimensions of the screen and playing area
 ; Adjust these to play on a larger terminal (ex: 132 x 43)
 %define TERMWIDTH	80				; Console terminal width = 80. 
 %define HEIGHT		24				; Console terminal height = 24.
-%define BOTTOMROW	'24'
-
+%define BOTTOMROW	'24'				; Used for terminal manipulation
 ; Starting Coordinates
-%define CENTERROW	HEIGHT / 2							; Calculate center row to display messages to user
+%define	TOPROW		1				; From what row the intro message will start
+%define CENTERROW	HEIGHT / 2			; Calculate center row to display messages to user
 %define SHIPSTART	(TERMWIDTH * (HEIGHT - (SHIPHEIGHT + 1) ) ) + (TERMWIDTH / 2)	; Ship starting point. +1 for status bar
-%define SHIPMAXRIGHT	SHIPSTART + (TERMWIDTH / 2) - 5					; Define max left and right to prevent ship from going out of bounds
-%define SHIPMAXLEFT	SHIPSTART - (TERMWIDTH / 2) + 3					; 
+%define SHIPMAXRIGHT	SHIPSTART + (TERMWIDTH / 2) - 5	; Define max left and right to prevent ship from going out of bounds
+%define SHIPMAXLEFT	SHIPSTART - (TERMWIDTH / 2) + 3	; 
 
-; Alien Data
-%define MAXALIENS	10							; The maximum number of aliens on the screen at one time
-%define	ALIENSPEED	18							; Compared against timerctl to see if alien should move
-										; Lower is faster, higher is slower. Note: 0 won't work.
-%define	FLASHSPEED	3							; Compared against flashctl to see if alien should flashctl
-										; Lower is more rapid flash, higher is slower.
-%define ALIENHEIGHT	3							; Heigh (in rows) of the alien
-%define ALIENWIDTH	7							; Width (in columns) of the alien
-										; Prevents alien from getting cut off on the right side
-%define	ALIENPADDING	1							; Padding to be added to starting position
-										; Prevents characters in second line from being cut off 
-%define UNDERALIEN	(ALIENHEIGHT * TERMWIDTH) - ALIENPADDING		; Calculates the first element of space below alien
+; (Intro) Star Constants
+%define FORMSPEED	10				; Controls speed at which new stars are formed
+%define MAXSTARS	10				; Maximum number of stars allowed on the screen at one time
 
-; Ship Data
-%define SHIPHEIGHT	5							; Ship's height, in rows
-%define SHIPWIDTH	8							; Ship's width, in columns	
+; Ship Constants
+%define SHIPHEIGHT	5				; Ship's height, in rows
+%define SHIPWIDTH	8				; Ship's width, in columns
 
-section .data						; Initialised data
+; Alien Constants
+%define MAXALIENS	10				; The maximum number of aliens on the screen at any one time
+%define	ALIENSPEED	18				; Compared against alienspdctl to see if alien should move
+							; Lower is faster, higher is slower. Note: 0 won't work.
+%define ALIENHEIGHT	3				; Heigh (in rows) of the alien
+%define ALIENWIDTH	7				; Width (in columns) of the alien
+							; Prevents alien from getting cut off on the right side
+%define	ALIENPADDING	1				; Padding to be added to starting position
+							; Prevents characters in second line from being cut off 
+%define UNDERALIEN	(ALIENHEIGHT * TERMWIDTH) - ALIENPADDING	; Used to calculate the first element of space below alien
+%define AFLASHLENGTH	25				; How long aliens flash after being hit (higher is longer)
 
-intromsg: 		db "Space Invaders! V1.0"	; Game title + version
-INTROMSGLEN: 		equ $-intromsg			; Length of message
-intromsg2:		db "Press a key to start!"	; Instructions to user
-INTROMSG2LEN:		equ $-intromsg2			; Length of message
+;#########################################################################
+;# Initialized Data							##
+;#########################################################################
+
+section .data
+
+; Intro Messages and their lenghts
+intromsg: 		db "ASCII Space Invaders V1.0"
+INTROMSGLEN: 		equ $-intromsg			
+intromsg2:		db "Instructions:"
+INTROMSG2LEN:		equ $-intromsg2
+intromsg3:		db "- Move spaceship using arrow keys"
+INTROMSG3LEN:		equ $-intromsg3
+intromsg4:		db "- Hit spacebar to fire laser"
+INTROMSG4LEN:		equ $-intromsg4
+intromsg5:		db "- Press 'q' to exit at any time"
+INTROMSG5LEN:		equ $-intromsg5
+intromsg6:		db "- Destroy 100 aliens to save Earth" 
+INTROMSG6LEN:		equ $-intromsg6
+intromsg7:		db "Press any key to start!" 
+INTROMSG7LEN:		equ $-intromsg7
+
+; Scoreboard message
 scoreboard		db "Score = "			; Scoreboard
 SCOREBOARDLEN:		equ $-scoreboard		; Length
-bordercorner:		db "*"				; Corner border character
-borderside:		db "|"				; Side border character
-bordertop:		db "-"				; Top border character
-space:			db " "				; Empty space character
+; Game Characters
+space:			db " "				; What is space?
 laserchar:		db "|"				; Laser character
+starchar:		db "|"				; Star character
 
+; Ending Messages
 alienswin1:		db "Aliens Win"			; Failure message #1
 ALIENSWIN1LEN:		equ $-alienswin1		; Length
-;alienswin2:		db "Your Score: "		; Failure message #2
-;ALIENSWIN2LEN:		equ $-alienswin2		; Length
 playerwins1:		db "Humans Win"			; Win message #1
 PLAYERWINS1LEN:		equ $-playerwins1		; Length
 playerwins2:		db "Congratulations. You saved Earth!" ; Win message #2
@@ -188,15 +219,14 @@ ALIEN2LEN:		equ $-alien2
 alien3:			db      "/ | \"
 ALIEN3LEN:		equ $-alien3
 
-; The table used to translate direction bitflags to ASCII characters
-; line-drawing characters
-; vtlines:	db	' xqmxxltqjqvkuwn'
-; asciilines:	db	' |-*||**-*-*****'
-
 ; The structure passed to the sigaction system call.
 sigact:		dd	tick				; 'tick' label is located in the refresh procedure
 
-section .bss						; Uninitialized data (.bss)
+;#########################################################################
+;# Unitialized Data							##
+;#########################################################################
+
+section .bss
 
 		resd 3					; Remainder of sigact structure (see above). Unnecessary?
 
@@ -214,7 +244,7 @@ termios: 	resd 3
 .lflag:		resd 1
 		resb 44
 		
-; Used to set an alarm. Serves as a timeval structure and an itimerval structure
+; Used to set a system alarm. Serves as a timeval structure and an itimerval structure
 timer:		resd 4
 
 ; The screen array. All screen elements including spaceship, aliens, laser, score, etc are drawn in this buffer
@@ -230,7 +260,7 @@ ship:		resd 1
 ; Flag set when ship hit by alien
 shipflash:	resd 1
 
-; Amount of time ship will flash before ending game
+; Amount of time ship will flash before game ends
 shipflashtimer:	resd 1
 
 ; Laser coordinates
@@ -246,24 +276,41 @@ alienflash:	resd MAXALIENS
 alienflashtimer: resd MAXALIENS
 
 ; Used to control when aliens advance forward
-timerctl:	resb 1
+alienspdctl:	resb 1
 
 ; Alien invaders. Keeps track of how many aliens are on screen
 invaders:	resd 1
 
 ; Alien loop control
 ; Used to process the correct number of elements in the alien table.
-alienloop:	resd 1
+aliencounter:	resd 1
+
+; Flag set to non-zero value if aliens win
+alienwin:	resd 1
+
+; Star coordinate table
+star:		resd MAXSTARS
+
+; Used to control the speed at which new stars are formed
+starspdctl:	resd 1
+
+; Used to count through the star table elements
+starcounter:	resd 1
 
 ; The file description bit array used by the select system call
 fdset:		resd 32
 
 section .text							; Section containing code
 
-; Description:
-; getkey retrieves a single character from standard input if one is waiting to be read.
+;#########################################################################
+;# Functions / Routines / Procedures					##
+;#########################################################################
+
+; GetKey()
 ;
-; Input:
+; Description: getkey retrieves a single character from standard input if one is waiting to be read.
+;
+; Input: 
 ; ECX = pointer to a byte in memory at which to store the character.
 ;
 ; Output:
@@ -322,9 +369,9 @@ getkey:
 .return:	mov	al, [ecx]				; Return the key that was pressed (Or zero if no key was pressed)
 		ret						; Return
 		
-
-; Description:
-; This routine checks to see if an alien has been hit by a laser
+; LaserCheck()
+;
+; Description: This routine checks to see if an alien has been hit by a laser
 ;
 ; Input: N/A
 ;
@@ -334,7 +381,7 @@ getkey:
 ; Check if any of the aliens have been hit by a laser
 
 lasercheck:	
-		mov	ecx, [alienloop]			; Used to process the correct number of elements in the alien table. 
+		mov	ecx, [aliencounter]			; Used to process the correct number of elements in the alien table. 
 .startloop:	mov	ebx, alien				; Copy address of alien table into EBX
 		dec	ecx					; 
 		lea	edx, [ebx+ecx*4]			; Get the memory address of the current alien							
@@ -385,18 +432,17 @@ lasercheck:
 .return		ret						; Return to caller
 
 		
-		
-; Description:
-; This routine checks if the alien should flash.
-; If the flash flag is set for a particular alien, the drawalien routine will be called intermittently, causing a flash effect.
+; FlashAlien()		
+; Description: This routine checks if the alien should flash.
+; If the alien's flash flag is set, the drawalien routine will be called once every two loop interations, causing a flash effect.
 ;
 ; Input: 
 ;
 ; Output:
 ;
-; are altered
+; Altered:
 flashalien:
-		mov	ecx, [alienloop]			; Set ECX counter to number of aliens to process
+		mov	ecx, [aliencounter]			; Set ECX counter to number of aliens to process
 .flashloop:	mov	ebx, alien				; Copy address of alien table into EBX	
 		dec	ecx					; Decrement counter (for memory calculation)
 		lea	edx, [ebx+ecx*4]			; Add ( (counter - 1) * 4) to EBX to the current alien's effective memory address
@@ -413,9 +459,9 @@ flashalien:
 								; Otherwise, alien should flash
 		mov	ebx, alienflashtimer			; Copy address of alienflashtimer table into EBX
 		dec	ecx
-		lea	eax, [ebx+ecx*4]			; Get address of alien's flash timerctl
+		lea	eax, [ebx+ecx*4]			; Get address of alien's flash timer
 		inc	ecx
-		cmp	[eax], dword 25				; Compare it to 25 (FLASHTIMER)
+		cmp	[eax], dword AFLASHLENGTH		; Compare it to alien flash length 
 		jge	.endflashing				; If greater or equal, jump to .end flashing to reset timer and delete alien
 								; Otherwise, check if it's time to flash
 		xor	ebx, ebx				; Zero EBX register
@@ -437,15 +483,15 @@ flashalien:
 .doloop		loop	.flashloop	
 		ret						; Return to caller
 		
-; Description:
-; This routine checks if the ship should flash.
-; The flashship variable will be set to a non-zero when it collides with an alien
+; FlashShip()
+; Description: This routine checks if the ship should flash.
+; If the shipflash variable is set to a non-zero value, the ship will be drawn once per two loop iterations
 ;
 ; Input: 
 ;
 ; Output:
 ;
-; are altered
+; Altered:
 flashship:
 		mov	ebx, shipflash				; Copy address of the shipflash flag variable into EBX
 		cmp	[ebx], dword NULL			; Is it zero?
@@ -472,8 +518,8 @@ flashship:
 .draw		call	drawship				; ECX holds index into alien table
 .finish		ret		
 		
-; Description:
-; Erase screen buffer in preparation for a new frame
+; EraseScr()
+; Description: Erase screen buffer in preparation for a new frame
 ;
 ; Input: N/A
 ;
@@ -498,8 +544,8 @@ erasescr:
 		pop eax
 		ret						; Return to caller
 		
-; Description:
-; Refresh writes the contents of outbuf to standard output.
+; Refresh()
+; Description: Writes the contents of the outbuf buffer to standard output.
 ;
 ; Input:N/A
 ;
@@ -543,7 +589,7 @@ refresh:
 		mov	ecx, edi					; Copy EDI to ECX (ECX = the buffer to write to stdout)
 		sub	edx, ecx					; Subtract ECX from EDX (EDX = count of bytes to be written)
 		xor	ebx, ebx					; Zero the EBX register
-		lea	eax, [byte ebx + SC_write]			; Load the SC_write syscall into EAX
+		mov	eax, SC_write
 		inc	ebx						; Increment EBX to 1 (EBX = fd = 1 = stdout)
 		int	0x80						; Perform system call
 		
@@ -551,19 +597,88 @@ refresh:
 tick:		ret							; Return (also part of signal timer struct)
 
 	
-; Description:
-; Draw the spaceship to outbuf starting at the specified location
+; DrawStars()
+; Description: Draws the stars for the intro
+;
+; Input:
+;
+; Output:
+;
+; Altered
+drawstars:
+		pushad						; Save all regisers
+		mov	ecx, MAXSTARS				; Copy MAXSTARS value into ECX. To be used as counter
+		mov ebx, star					; Copy star table address into EBX
+		
+.starloop	xor 	edx, edx				; Zero EDX regiser
+		dec ecx
+		lea edx, [ebx+ecx*4]				; Get address of star
+		inc ecx
+		cmp	[edx], dword NULL			; Is it zero?
+		jz	.doloop					; If so, decrement ECX and check next element
+								; Otherwise...
+		mov edi, scr					; Point EDI to scr buffer
+		add edi, [edx]					; Add star's coordinates to EDI
+		mov al, [starchar]				; Copy star character into AL
+		stosb						; And then copy it into the screen buffer at the correct coordinates
+		
+.doloop		loop	.starloop				; Decrement ECX and check next element
+		
+		popad						; Restore all registers
+		ret						; Return to caller
+		
+; DrawIntroMsg()
+; Description: Prints the intro messages (name, version #, instructions, etc) to the screen 
+;
+; Input:
+;
+; Output:
+;
+; Altered:
+drawintromsg:
+		pushad						; Save all registers
+		
+		xor	edx,edx
+		mov 	esi, intromsg				; Copy message address into ESI
+		mov 	ecx, INTROMSGLEN			; Copy length into ECX
+		mov 	edx, TOPROW				; Copy center row into EDX (height / 2)
+		call 	wrtcntr					; Call the write center routine
+		mov 	esi, intromsg2				; Copy 2nd message address into ESI
+		mov 	ecx, INTROMSG2LEN			; Copy lenght to ECX
+		mov 	edx, TOPROW + 2				; Copy to center row + 1
+		call	wrtcntr					; Call the write center routine
+		mov 	esi, intromsg3				; Copy 2nd message address into ESI
+		mov 	ecx, INTROMSG3LEN			; Copy lenght to ECX
+		mov 	edx, TOPROW + 4				; Copy to center row + 1
+		call	wrtcntr					; Call the write center routine
+		mov 	esi, intromsg4				; Copy 2nd message address into ESI
+		mov 	ecx, INTROMSG4LEN			; Copy lenght to ECX
+		mov 	edx, TOPROW + 5				; Copy to center row + 1
+		call	wrtcntr					; Call the write center routine
+		mov 	esi, intromsg5				; Copy 2nd message address into ESI
+		mov 	ecx, INTROMSG5LEN			; Copy lenght to ECX
+		mov 	edx, TOPROW + 6				; Copy to center row + 1
+		call	wrtcntr					; Call the write center routine
+		mov 	esi, intromsg6				; Copy 2nd message address into ESI
+		mov 	ecx, INTROMSG6LEN			; Copy lenght to ECX
+		mov 	edx, TOPROW + 7				; Copy to center row + 1
+		call	wrtcntr					; Call the write center routine
+		mov 	esi, intromsg7				; Copy 2nd message address into ESI
+		mov 	ecx, INTROMSG7LEN			; Copy lenght to ECX
+		mov 	edx, TOPROW + 9				; Copy to center row + 1
+		call	wrtcntr					; Call the write center routine
+		
+		popad						; Restore all registers
+		ret						; Return to caller
+	
+; DrawShip()
+; Description: Draw the spaceship to scr buffer starting at its current coordinates
 ;
 ; Input: 
 ;
 ; Output:
 ;
-; 
-;      /\
-;     (  )
-;     (  )
-;    /|/\|\
-;   /_||||_\
+; Altered:
 
 drawship:
 
@@ -613,15 +728,15 @@ drawship:
 		pop eax
 		ret						; Return to caller
 		
-; Description:
-; Draw aliens
+; DrawAliens()
+; Description: This function is called by FlashAlien() and will draw an alien at its coordinates
 ;
 ; Input:
 ; ECX - index of alien in alien table
 ;
 ; Output:
 ;
-; are altere
+; Altered:
 
 drawaliens:
 		push 	eax					; Save modified registers
@@ -665,14 +780,14 @@ drawaliens:
 		ret						; Return to caller
 
 	
-; Description:
-; Draw laser to screen buffer
+; DrawLaser()
+; Description: Draw laser to screen buffer at its current coordinates
 ;
 ; Input: 
 ;
 ; Output:
 ;
-; are altered
+; Altered
 
 drawlaser:
 		push 	eax					; Save modified registers
@@ -692,8 +807,8 @@ drawlaser:
 		pop eax
 		ret						; Return to caller
 		
-; Description:
-; Draw score at the bottom right corner of the screen
+; DrawScore()
+; Description: Draw score at the bottom right corner of the screen
 ;
 ; Input:
 ; ESI = location of source string
@@ -702,8 +817,7 @@ drawlaser:
 ;
 ; Output:
 ;
-; Note: REP MOVSB copies bytes from ESI to EDI, ECX number of times.
-; Note: REP STOSB copies whatever is in AL to EDI, ECX number of times.
+; Altered:
 
 drawscore:
 
@@ -740,8 +854,8 @@ drawscore:
 		pop eax
 		ret						; Return to caller
 		
-; Description:
-; Write a string centered the the specified row
+; WrtCntr()
+; Description: Write a string centered to the specified row
 ;
 ; Input: 
 ; ESI = location of source string
@@ -750,7 +864,7 @@ drawscore:
 ;
 ; Output:
 ;
-; EAX, EDI are altered
+; Altered: EAX, EDI
 
 wrtcntr:
 	
@@ -773,12 +887,14 @@ wrtcntr:
 		ret
 				
 
+;#########################################################################
+;# GLOBAL START								##
+;#########################################################################
+
 global 	_start							; Used by linker to find entry point
 
 _start:
-		nop						; Debugging purposes
-		mov 	ebp, score				; EBP is set to point to score for the entire game
-	
+
 ; initializeTerminal
 ; The attributes of the TTY connected to stdin are retrieved, 
 ; and then canonical mode and input echoing are turned
@@ -788,14 +904,14 @@ _start:
 		mov	edx, termios				; Load the address of termios into EDX
 		mov	ecx, TCGETS				; Load the TCGETS value into ECX
 		xor	ebx, ebx				; Zero the EBX register
-		lea	eax, [byte ebx + SC_ioctl]		; Load SC_ioctl system call value into EAX
+		mov	eax, SC_ioctl
 		int	0x80					; Perform system call
 		mov	eax, [termios.lflag]			; Copy the value at termios.lflag into EAX
 		push	eax					; Push original value onto the stack
 		and	eax, byte ~(ICANON | ECHO)		; ~ computes the one's complement of its operand. Make changes to lflag
 		mov	[termios.lflag], eax			; Copy the modified lflag value back into memory
 		inc	ecx					; Increment ECX, so that TCGETS becomes TCSETS
-		lea	eax, [byte ebx + SC_ioctl]		; Load SC_ioctl system call value into EAX
+		mov	eax, SC_ioctl
 		int	0x80					; Perform system call
 		pop	dword [termios.lflag]			; Pop original lflag value back into memory (no syscall, so no change)
 
@@ -803,22 +919,241 @@ _start:
 ; A do-nothing signal handler is installed for SIGALRM, and then an
 ; interval timer is set up to go off every x seconds.
 
-		lea	eax, [byte ebx + SC_sigaction]		; Load SC_sigaction value into EAX register
+		mov	eax, SC_sigaction
 		cdq						; Convert double word to quad word. EAX becomes EDX:EAX
 		mov	bl, SIGALRM				; Load SIGALRM value into low byte of EBX
 		mov     ecx, sigact				; Move address of sigact into ECX (sigact points to ret instruction)
 		int	0x80					; Perform system call
 		mov	ecx, timer				; Load address of timer structure into ECX
-		mov	eax, 25 * 1000				; Load the result of 25 * 1000 into EAX (0.025 seconds for fast lasers)
+		mov	eax, INTROSPEED * 1000			; Load the result of INTROSPEED * 1000 into EAX (controls speed of incoming stars)
 		mov	[byte ecx + 4], eax			; Copy the result into the 4th byte of timer
 		mov	[byte ecx + 12], eax			; And copy the result into the 12th byte of timer
 		cdq						; Convert double word to quad word. EDX:EAX
 		xor	ebx, ebx				; Zero the EBX register
-		lea	eax, [byte ebx + SC_setitimer]		; Load SC_setitimer system call value into EAX
+		mov	eax, SC_setitimer
 		int	0x80					; Perform system call
 
 ; initializeRnd
 ; The current time is used to initialize the pseduorandom-number generator
+
+		mov	ebx, rndseed				; Copy the address of rndseed into EBX
+		mov	eax, SC_gettimeofday 			; Copy the value of system call SC_gettimeofday into EAX
+		int	0x80					; Perform system call. Current time is written to rndseed
+	
+; initializeScreen 
+; Erase scr buffer (fill it with spaces)
+
+		call erasescr
+		
+; draw welcome message
+
+		call drawintromsg
+		
+; drawShip
+; Set the ship's starting coordinates and draw it on the screen buffer
+		mov	eax, SHIPSTART
+		mov	[ship],eax
+		call drawship
+		
+;#########################################################################
+;# Enter Intro Main Loop						##
+;#########################################################################
+
+introloop:
+
+;#########################################################################
+;# getkey								##
+;#########################################################################
+; Examine the input queue. If a keystroke is waiting in there, then
+; remove it and use it as this iteration's keystroke.
+; If two keystrokes are waiting there, remove the first one and move
+; the second one into its position
+
+		mov	ecx, key				; Copy the address of key (key input queue) into ECX
+		mov	al, [byte ecx + 1]			; Copy the second byte of key to AL
+		or	al, al					; OR AL with itself
+		jz	.readkey				; If zero (no key) jump to readkey procedure
+		xor	edx, edx				; Otherwise, we have a key. Zero the EDX register
+		cmp	dl, [byte ecx + 2]			; Check the third byte of key for a keystroke
+		jz	.retlast				; If it's empty, jump to retlast
+		xchg	dl, [byte ecx + 2]			; If not empy, move it into DL and move DL's value (zero) into the third byte of key
+.retlast:	mov	[byte ecx + 1], dl			; Move whatever is in DL (zero or keystroke) into the second byte of key
+.retkey:	mov	[ecx], al				; Copy the keystroke to the first byte of key
+		jmp	short .endkeys				; Jump to endkeys routine
+
+; Otherwise, check for an incoming character. If anything besides ESC
+; is returned (including zero, indicating no keys have been pressed),
+; then proceed with that key. Otherwise, check for a second
+; character. If anything besides '[' or 'O' is returned, then put the
+; character in the input queue and proceed with the ESC. Otherwise,
+; check for a third character. If anything besides 'C' or 'D' is
+; returned, then put it and the previous character into the input
+; queue and proceed with the ESC. Otherwise, replace the arrow-key
+; sequence with an 'm' or an 'n', as appropriate.
+
+.readkey:	call	getkey					; Call the getkey routine
+		cmp	al, ESC					; Compare AL with ESC
+		jnz	.endkeys				; If not ESC, continue on with program
+		inc	ecx					; Increment ECX. The next keystroke will be placed at key + 1
+		call	getkey					; Call the getkey routine
+		cmp	al, '['					; Compare AL with '['
+		jz	.getthird				; If it is '[', jump to getthird
+		cmp	al, 'O'					; Compare AL to '0'
+		jnz	.endkeys				; If it's not zero, continue with program
+.getthird:	inc	ecx					; Increment ECX. The next keystroke will be placed at key + 2
+		call	getkey					; Call the getkey routine
+		cmp	al, 'C'					; Check for right arrow ^[[C
+		jz	.acceptarrow				; If it is 'C', jump to acceptarrow
+		cmp	al, 'D'					; Check for left arrow ^[[D
+		jnz	.endkeys				; If not, jump to end keys
+.acceptarrow:	add	al, 'm' - 'C'				; Convert arrow key to an 'm' or 'n'. Add 'm' - 'C' (0x6D - 0x43 = 0x2A *) to AL
+		movzx	eax, al					; movzc - Move and zero extend the register. Move AL into EAX and zero the remaining bits.
+		mov	[byte ecx - 2], eax			; Copy EAX (AL) into the first byte of key
+.endkeys:
+
+; If a 'q' was retrieved, exit the program immediately. 
+
+		cmp	al, 'q'					; Check if AL = 'q'
+		jz	near leavegame				; If so, jump to leave game
+		cmp	al, NULL				; Has the user pressed a key?
+		jnz	maininit				; If so, call the main program
+		
+;#########################################################################
+;# Form Stars								##
+;#########################################################################
+
+; Check if it's time to form a new star. If so, process the .formstar instructions. Otherwise, skip ahead
+
+		mov	eax, [starspdctl]			; Move starspdctl value into EAX
+		cmp	eax, FORMSPEED				; Compare it to FORMSPEED
+		jl	.skipform				; Jump ahead if it's not time yet
+								; Otherwise, spawn an alien
+.formstar:	mov	[starspdctl], dword NULL			; Zero the spawning timer
+
+.positionstar:
+		xor	ecx, ecx
+; Generate a random number and divide it by terminal width minus alien width
+; Use the remainder as the star's starting coordinates
+		mov	eax, [rndseed]				; Copy the value at rndseed into EAX. This value was set during the initialization of the program.
+
+		mov	edx, 1103515245				; Copy large number into EDX
+		mul	edx					; Multiply EDX by EAX and store the result int EDX:EAX
+		add	eax, 12345				; Add number to EAX
+		shl	eax, 1					; Shift all bits in EAX one to the left. The left most bit is shifted into the carry flag. Rightmost bit is cleared to zero.
+		shr	eax, 1					; Shift all bits in EAX one to the right. The right most bit is shifted into the carry flag. Leftmost bit is cleared to zero.
+		mov	[rndseed], eax				; Copy the jumbled up value back into rndseed. Jumbled value remains in EAX for the following instructions.
+		mov	ebx, (TERMWIDTH - 60)
+		
+		xor	edx, edx				; Zero EDX register, where the remainder of division result will go.
+		
+		;xor	eax, eax
+		div	ebx					; Perform division. EAX / 80. Remainder (0-19) goes into EDX (star's starting point)
+		; Move star to its starting point 
+		xor 	eax, eax				; Zero EAX register. Prepare it for star's new starting point.
+		inc	edx					; Prevent star from starting at position 0 (won't exist)
+		
+		jp	.rightside				; If parity flag set (even), jump to .rightside
+		add	eax, edx				; Add remainder of division of random number to starting position
+		jmp	.leftside				; Otherwise, don't add anything. Leave star on left side.
+		
+.rightside	add	eax, edx				; Add remainder of division of random number to starting position
+		add	eax, (TERMWIDTH - 20)			; Add 60 to put it on the right side
+
+.leftside	mov	ebx, star				; Copy address of star table into EDX
+		
+		mov	ecx, dword [starcounter]		; Copy starcounter value into ECX
+		
+		lea	edx, [ebx+ecx*4]			; Add ( (counter - 1) * 4) to EBX to the current star's effective memory address
+		
+		mov 	[edx], eax				; Copy the star's starting point into the star's memory slot
+		
+		inc	dword [starcounter]			; Increment aliencounter for next time routine is called
+		
+		cmp	dword [starcounter], MAXSTARS		; Have we reached ten?
+		jl	.continue				; Not yet? Jump out of loop
+		mov	dword [starcounter], NULL		; Otherwise, reset counter to zero
+		
+.continue:	jmp	staradvance				; Skip passed the increment step below, as we zero'd the spawn timer at the beginning of the routine
+
+.skipform:	inc dword [starspdctl]				; Increment spawn timer
+
+;#########################################################################
+;# Advance Stars							##
+;#########################################################################
+staradvance:
+		xor	ecx, ecx
+		mov	ecx, MAXSTARS				; Process # of aliens create
+.advancestar	mov	ebx, star				; Copy the address of the star table into EDX
+		dec 	ecx
+		lea	edx, [ebx+ecx*4]			; Get the memory address of the current star
+		inc	ecx
+		; Check if no star exits
+		cmp	[edx], dword NULL			; If zero, jump to .doloop which decrements ECX and jumps to start of loop
+		jz	.doloop2				;
+
+		add	dword [edx], TERMWIDTH			; Otherwise, advance. Add TERMWIDTH to star's coordinates
+		cmp	dword [edx], ( TERMWIDTH * ( HEIGHT - 1) )	; Check if star has passed bottom row 
+		jle	.doloop2				; If the star hasn't passed the bottom row, continue
+		mov	[edx], dword NULL			; Otherwise, zero the star
+		
+.doloop2	loop	.advancestar				; Move remaining aliens forward
+
+
+		
+;#########################################################################
+;# prepSCREEN								##
+;#########################################################################
+; The screen buffer is erased and then all components of the game are then drawn to it
+		call	erasescr				; Erase screen buffer
+		call	drawintromsg				; Draw welcome message and instructions
+		call	drawship				; Draw ship
+		call	drawstars				; Draw stars
+		
+;#########################################################################
+;# REFRESH AND LOOP							##
+;#########################################################################
+; The refresh routine is called, which writes the scr buffer to outbuf and then prints outbuf to stdout.
+; This needs to be called AFTER the terminal screen is erased, otherwise
+; the alien ship will not make visual contact with the ship before exiting the game
+		call	refresh					; Call the refresh procedure, which writes the output buffer to stdout
+		
+; The program goes to sleep until the next SIGALRM arrives, 
+; whereupon it begins the next iteration of the main loop.
+		push	SC_pause				; Push the SC_pause service routine value onto the stack
+		pop	eax					; Pop it into EAX
+		int  	0x80					; Perform system call.
+		jmp	near introloop				; Jump back to the main loop
+		
+		
+;#########################################################################
+;# Initialize Main Program						##
+;#########################################################################
+
+maininit:
+
+; initializeTerminal done in intro initialization
+
+; initializeTimers
+; Increase speed of game from INTROSPEED to GAMESPEED
+; A do-nothing signal handler is installed for SIGALRM, and then an
+; interval timer is set up to go off every x seconds.
+
+		mov	eax, SC_sigaction
+		cdq						; Convert double word to quad word. EAX becomes EDX:EAX
+		mov	bl, SIGALRM				; Load SIGALRM value into low byte of EBX
+		mov     ecx, sigact				; Move address of sigact into ECX (sigact points to ret instruction)
+		int	0x80					; Perform system call
+		mov	ecx, timer				; Load address of timer structure into ECX
+		mov	eax, GAMESPEED * 1000			; Load the result of GAMESPEED * 1000 into EAX (0.025 seconds for fast lasers)
+		mov	[byte ecx + 4], eax			; Copy the result into the 4th byte of timer
+		mov	[byte ecx + 12], eax			; And copy the result into the 12th byte of timer
+		cdq						; Convert double word to quad word. EDX:EAX
+		xor	ebx, ebx				; Zero the EBX register
+		mov	eax, SC_setitimer
+		int	0x80					; Perform system call
+
+; initializeRnd
+; The current time is used to re-initialize the pseduorandom-number generator
 
 		mov	ebx, rndseed				; Copy the address of rndseed into EBX
 		mov	eax, SC_gettimeofday 			; Copy the value of system call SC_gettimeofday into EAX
@@ -843,7 +1178,9 @@ _start:
 ; drawEnergy
 ; Under Construction
 
-; The main loop
+;#########################################################################
+;# Enter Main Loop							##
+;#########################################################################
 
 mainloop:
 
@@ -953,19 +1290,19 @@ mainloop:
 		jl	.sixaliens				; Not yet? Spawn six aliens
 		jmp	.eightaliens				; Level 4 passed. Spawn eight aliens !!
 .onealien:	mov	[invaders], dword 1 			; Spawn one alien (This value is decremented when aliens are destroyed)
-		mov	[alienloop], dword 1			; Set loop control (Won't change outside of this routine)
+		mov	[aliencounter], dword 1			; Set loop control (Won't change outside of this routine)
 		jmp	.positionalien				; Jump ahead to positionaliens
 .twoaliens:	mov	[invaders], dword 2			; Spawn two aliens
-		mov	[alienloop], dword 2			; Set loop control
+		mov	[aliencounter], dword 2			; Set loop control
 		jmp	.positionalien				; Jump to positionaliens
 .fouraliens:	mov	[invaders], dword 4			; Spawn three aliens
-		mov	[alienloop], dword 4			; Set loop control
+		mov	[aliencounter], dword 4			; Set loop control
 		jmp	.positionalien				; Jump to position aliens
 .sixaliens:	mov	[invaders], dword 6
-		mov	[alienloop], dword 6			
+		mov	[aliencounter], dword 6			
 		jmp	.positionalien
 .eightaliens:	mov	[invaders], dword 8			; Spawn eight aliens
-		mov	[alienloop], dword 8			; Set loop control
+		mov	[aliencounter], dword 8			; Set loop control
 								; Proceed to positionaliens
 
 .positionalien:	xor	eax,eax					; Clear (zero) registers 
@@ -978,7 +1315,7 @@ mainloop:
 		mov	ebp, eax				; Store unmodified quotient (screen divider) in EBP (for use in loop)
 		mov	ebx, eax				; Move the quotient into EBX
 		sub	ebx, ALIENWIDTH				; Subtract alien width. EBX will be used to divide random numbers from which we will use the remainder
-		mov	ecx, [alienloop]			; Set counter. Repeat below instructions for each alien
+		mov	ecx, [aliencounter]			; Set counter. Repeat below instructions for each alien
 .getrandom:	mov	eax, [rndseed]				; Copy the value at rndseed into EAX. This value was set during the initialization of the program.
 		mov	edx, 1103515245				; Copy large number into EDX
 		mul	edx					; Multiply EDX by EAX and store the result int EDX:EAX
@@ -1021,12 +1358,12 @@ collcheck1:	call	lasercheck
 		jnz	.shipflashing				; If so, don't move the aliens
 		
 ; Check if it's time for the aliens to move forward (based on timer)	
-.advancecheck:	cmp	[timerctl], byte ALIENSPEED		; Check if the aliens should advance or wait for another 
+.advancecheck:	cmp	[alienspdctl], byte ALIENSPEED		; Check if the aliens should advance or wait for another 
 								; signal alarm from the operating system (this paces the attack)
-		jl	.finishalien				; If not, skip the routine and increment timerctl
+		jl	.finishalien				; If not, skip the routine and increment alienspdctl
 								; Otherwise, continue
-		mov	byte [timerctl], 0			; Time for alien to move forward. Reset timerctl to zero.
-		mov	ecx, [alienloop]			; Process # of aliens created
+		mov	byte [alienspdctl], 0			; Time for alien to move forward. Reset alienspdctl to zero.
+		mov	ecx, [aliencounter]			; Process # of aliens created
 .advancealien	mov	ebx, alien				; Copy address of alien into EDX
 		dec 	ecx
 		lea	edx, [ebx+ecx*4]			; Get the memory address of the current alien
@@ -1045,13 +1382,20 @@ collcheck1:	call	lasercheck
 		add	dword [edx], TERMWIDTH			; Advance. Add TERMWIDTH to alien's coordinates
 		cmp	dword [edx], ( TERMWIDTH * ( HEIGHT - ALIENHEIGHT - 1 ) )	; Check if alien has invaded successfully (touched bottom row) 
 		jle	.doloop2				; If the alien hasn't breached past the bottom row, continue
-		jmp	alienswin				; Otherwise, the aliens have won. Exit game. 
+		;jmp	alienswin				; Otherwise, the aliens have won. Exit game.
+		inc	DWORD [alienwin]			; Instead of exiting the loop immediately, set the alienwin flag and allow
+								; the remaining aliens to move forward. This will prevent the aliens
+								; from appearing to land unevenly 
 		
 .doloop2	loop	.advancealien				; Move remaining aliens forward
 
 		
-.finishalien:	inc	byte [timerctl]				; Increment the timer control value
+.finishalien:	inc	byte [alienspdctl]			; Increment the timer control value
 .shipflashing:
+
+; Check if the aliens have won
+		cmp	[alienwin], DWORD NULL			; alienwin still contains zero?
+		jnz	alienswin				; If not, the aliens have won.
 
 ; Collision check #2
 ; After alien moves
@@ -1122,6 +1466,7 @@ alienswin:	call erasescr					; Erase the screen buffer to prepare for final fram
 		mov ecx, ALIENSWIN1LEN
 		mov edx, CENTERROW
 		call wrtcntr
+		; Redraw all elements to prevent blank window
 		call drawship					; Draw spaceship
 		call flashalien					; Draw aliens in their final positions
 		call drawscore					; Draw final score
@@ -1153,7 +1498,7 @@ leavegame:
 		mov	edx, termios					; Load the address of termios into EDX
 		mov	ecx, TCSETS					; Load the TCSETS value into ECX
 		xor	ebx, ebx					; Zero the EBX register
-		lea	eax, [byte ebx + SC_ioctl]			; Load SC_ioctl system call value into EAX
+		mov	eax, SC_ioctl
 		int	0x80						; Perform system call
 		xchg	eax, ebx					; Swap EAX and EBX
 		inc	eax						; Increment EAX to 1. Exit syscall = 1
