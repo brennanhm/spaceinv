@@ -17,7 +17,7 @@
 
 ; CHANGELOG:
 ; Oct 19th, 2015 - The game no longer uses VT-100 special line chars. The screen is filled with standard ASCII.
-; Oct 24th, 2015 - Added alien spacecraft & a timer control (ALIENSPEED) to pace their attack.
+; Oct 24th, 2015 - Added alien spacecraft & a timer control (ALIENSPEED1) to pace their attack.
 ;		   Laser detects collisions with aliens and causes them to disappear
 ; Oct 26th, 2015 - Score increases when alien is destroyed. Current MAX SCORE is 99.
 ;		   Game exits if alien reaches bottom row
@@ -36,6 +36,9 @@
 ; Nov 5th, 2015	 - Game ends (aliens win) when alien collides with spaceship
 ; Nov 6th, 2015  - Ship stalls and flashes when hit by an alien. Alien movement is also halted.
 ; Nov 10th, 2015 - Incorporated intro, which contains instructions, into the main program. 
+; Nov 11th, 2015 - Added "angry alien" art. The angry aliens move faster than the normal ones and are worth two points when destroyed.
+; 		 - Two constants represent alien speed. ALIENSPEED1 = normal speed. ALIENSPEED2 = angry alien speed. If the fastalien variable flag is raised, the alien move routine uses ALIENSPEED2.
+;		 - Mixed up the levels so there is a mixture of normal and angry aliens in various numbers. Currently, player must score 100 points to win.
 
 ; TODO
 
@@ -44,12 +47,12 @@
 ; Optimize code
 ; Improve code documentation
 ; Move the second collision check into move alien routine?
-; Add different alien art
 ; Check lasercheck shipflash code (will continue incrementing after collision)
-; 'Any key' does not include ctrl, shift, or alt
+; Add points
 
 ; CURRENT BUGS
 ; Lower half of screen flashes when terminal height and width increased
+; 'Any key' does not include ctrl, shift, or alt
 
 ; FIXED BUGS
 ;
@@ -101,11 +104,17 @@
 %define GAMESPEED	25				; Speed setting for main game (lower is faster)
 %define NULL		0				; Define NULL as zero
 %define NONZERO		1				; Define NONZERO as one
-%define MAXSCORE	99				; Game exits when this score is reached
-%define LEVEL1		5				; Level 1 until score reaches 5
-%define LEVEL2		15				; Level 2 until score reaches 15
-%define LEVEL3		50				; Level 3 until score reaches 50
-%define LEVEL4		75				; Level 4 until score reaches 75						
+%define MAXSCORE	100				; Game exits with success message when this score is reached
+%define LEVEL1		4				; Scores required to reach each level
+%define LEVEL2		8
+%define LEVEL3		12
+%define LEVEL4		24
+%define LEVEL5		32
+%define LEVEL6		44
+%define LEVEL7		56
+%define LEVEL8		72
+%define LEVEL9		84
+%define LEVEL10		100
 ; Dimensions of the screen and playing area
 ; Adjust these to play on a larger terminal (ex: 132 x 43)
 %define TERMWIDTH	80				; Console terminal width = 80. 
@@ -128,8 +137,9 @@
 
 ; Alien Constants
 %define MAXALIENS	10				; The maximum number of aliens on the screen at any one time
-%define	ALIENSPEED	18				; Compared against alienspdctl to see if alien should move
-							; Lower is faster, higher is slower. Note: 0 won't work.
+%define	ALIENSPEED1	18				; Normal alien speed
+%define ALIENSPEED2	11;18				; Angry alien speed
+							; Compared against alienspdctl to see if alien should move. Lower is faster, higher is slower. Note: 0 won't work.
 %define ALIENHEIGHT	3				; Heigh (in rows) of the alien
 %define ALIENWIDTH	7				; Width (in columns) of the alien
 							; Prevents alien from getting cut off on the right side
@@ -155,7 +165,7 @@ intromsg4:		db "- Hit spacebar to fire laser"
 INTROMSG4LEN:		equ $-intromsg4
 intromsg5:		db "- Press 'q' to exit at any time"
 INTROMSG5LEN:		equ $-intromsg5
-intromsg6:		db "- Destroy 100 aliens to save Earth" 
+intromsg6:		db "- Score 100 points to save Earth" 
 INTROMSG6LEN:		equ $-intromsg6
 intromsg7:		db "Press any key to start!" 
 INTROMSG7LEN:		equ $-intromsg7
@@ -183,6 +193,7 @@ digits:			db "000001002003004005006007008009010011012013014015016017018019"
 			db "040041042043044045046047048049050051052053054055056057058059"
 			db "060061062063064065066067068069070071072073074075076077078079"
 			db "080081082083084085086087088089090091092093094095096097098099"
+			db "100101102103104105106107108109110111112113114115116117118119"
 DIGITSLEN:		equ 3				; Length of digits
 
 ; Spaceship strings
@@ -207,17 +218,32 @@ SPCSHP5LEN:		equ $-spcshp5
 
 ; Alien strings
 ; http://www.retrojunkie.com/asciiart/celest/aliens.htm
-
+;
+; Calm alien
+;
 ;    _/_\_     
 ;   (o_o_o)  
 ;    / | \
-
+;
+; Angry alien
+;
+;     \ /
+;   ((o.o))
+;    //^\\
+	
 alien1:			db	"_/_\_"
 ALIEN1LEN:		equ $-alien1
 alien2:			db     "(o_o_o)" 
 ALIEN2LEN:		equ $-alien2
 alien3:			db      "/ | \"
 ALIEN3LEN:		equ $-alien3
+
+alien4:			db	" \ / "
+ALIEN4LEN:		equ $-alien4
+alien5:			db     "((o.o))"
+ALIEN5LEN:		equ $-alien5
+alien6:			db	"//^\\"
+ALIEN6LEN:		equ $-alien6
 
 ; The structure passed to the sigaction system call.
 sigact:		dd	tick				; 'tick' label is located in the refresh procedure
@@ -274,6 +300,9 @@ alienflash:	resd MAXALIENS
 
 ; Alien flash timer table. Each alien has its own flash timer
 alienflashtimer: resd MAXALIENS
+
+; Alien speed flag. If set to a non-zero value, alien moves fast
+fastalien:	resd 1
 
 ; Used to control when aliens advance forward
 alienspdctl:	resb 1
@@ -416,7 +445,10 @@ lasercheck:
 		jnz	.shiphit				; No? Then it collided with spaceship. Set ship flash flag.
 								; Otherwise, process destroy alien instructions
 		mov	dword [laser], NULL			; Erase laser
-		inc	dword [score]				; Increment the score
+		cmp	[fastalien], dword NULL			; Is it a fast alien?
+		jz	.onepoint				; If not, only one point
+		inc	dword [score]				; Fast aliens are worth two points
+.onepoint	inc	dword [score]				; Increment the score
 		; Set the alien flash flag
 		mov	edx, alienflash				
 		dec	ecx
@@ -752,6 +784,9 @@ drawaliens:
 		lea edx, [ebx+ecx*4]				; Get address of alien 
 		inc ecx
 		
+		cmp	[fastalien], byte NULL			; Angry alien flag set?
+		jnz	.angryalien				; If so, draw an angry alien
+		
 		mov edi, scr					; Point EDI to scr buffer
 		add edi, [edx]					; Add alien's coordinates to EDI
 		mov esi, alien1					; Alien line 1
@@ -770,7 +805,30 @@ drawaliens:
 		mov ecx, ALIEN3LEN				; Length
 		rep movsb					; Copy line 3
 		
-.noaliens:
+		jmp	.finish
+		
+.angryalien:
+
+		mov edi, scr					; Point EDI to scr buffer
+		add edi, [edx]					; Add alien's coordinates to EDI
+		mov esi, alien4					; Alien line 1
+		mov ecx, ALIEN1LEN				; Length
+		rep movsb					; Copy line 1
+				
+		mov edi, scr + (TERMWIDTH - 1)			; Point EDI to scr buffer + Character positioning
+		add edi, [edx] 					; Add alien's coordinates to EDI
+		mov esi, alien5					; Alien line 2
+		mov ecx, ALIEN2LEN				; Length
+		rep movsb					; Copy line 2
+		
+		mov edi, scr + (TERMWIDTH * 2)			; Point EDI to scr buffer + 3rd row
+		add edi, [edx] 					; Add alien's coordinates to EDI
+		mov esi, alien6					; Alien line 3
+		mov ecx, ALIEN3LEN				; Length
+		rep movsb					; Copy line 3
+		
+		
+.finish:
 		pop edi						; Restore registers
 		pop esi
 		pop edx
@@ -1164,6 +1222,10 @@ maininit:
 
 		call erasescr
 		
+; initializeAlienSpeed
+		; check now done when decided whether or not to advance aliens
+		;mov	[alienspeed], dword ALIENSPEED1		; Set initial speed of aliens for first half of game
+		
 ; drawShip
 ; Set the ship's starting coordinates and draw it on the screen buffer
 		mov	eax, SHIPSTART
@@ -1279,22 +1341,45 @@ mainloop:
 		cmp	eax, dword NULL				; Compare it to NULL
 		jnz	collcheck1				; If there is one or more aliens, check if they've been hit by a laser
 								; Otherwise, execute the createaliens instructions
+		mov	[fastalien], dword NULL			; Reset fastalien flag to zero
 .createaliens:	mov	eax, [score]				; Copy current score into EAX
-		cmp	eax, LEVEL1				; Passed level one?
-		jl	.onealien				; Not yet? Spawn one alien
-		cmp	eax, LEVEL2				; Level 1 passed. Passed level two?
-		jl	.twoaliens				; Not yet? Spawn two aliens
-		cmp	eax, LEVEL3				; Level 2 passed. Passed level three?
-		jl	.fouraliens				; Not yet? Spawn four aliens
-		cmp	eax, LEVEL4				; Level 3 passed. Passed level four?
-		jl	.sixaliens				; Not yet? Spawn six aliens
-		jmp	.eightaliens				; Level 4 passed. Spawn eight aliens !!
+		cmp	eax, LEVEL1				; Check which level the player is in and spawn appropriate number of aliens
+		jl	.onealien				; Still in level 0
+		cmp	eax, LEVEL2
+		jl	.onefastalien				; Still in level 1
+		cmp	eax, LEVEL3
+		jl	.twoaliens				; Still in level 2
+		cmp	eax, LEVEL4
+		jl	.onefastalien				; Still in level 3
+		cmp	eax, LEVEL5
+		jl	.fouraliens				; Still in level 4
+		; Midgame
+		;mov	[alienspeed], DWORD ALIENSPEED2		; Increase alien advance speed for second half of game
+		cmp	eax, LEVEL6
+		jl	.twofastaliens				; Still in level 5
+		cmp	eax, LEVEL7
+		jl	.sixaliens				; Still in level 6
+		cmp	eax, LEVEL8
+		jl	.twofastaliens				; Still in level 7
+		cmp	eax, LEVEL9
+		jl	.sixaliens				; Still in level 8
+		cmp	eax, LEVEL10
+		jl	.eightaliens				; Still in level 9
+		jmp	.eightaliens				; Anything else? Spawn eight aliens.
 .onealien:	mov	[invaders], dword 1 			; Spawn one alien (This value is decremented when aliens are destroyed)
 		mov	[aliencounter], dword 1			; Set loop control (Won't change outside of this routine)
 		jmp	.positionalien				; Jump ahead to positionaliens
+.onefastalien	mov	[fastalien], dword NONZERO		; Set fastalien flag
+		mov	[invaders], dword 1
+		mov	[aliencounter], dword 1
+		jmp	.positionalien
 .twoaliens:	mov	[invaders], dword 2			; Spawn two aliens
 		mov	[aliencounter], dword 2			; Set loop control
 		jmp	.positionalien				; Jump to positionaliens
+.twofastaliens	mov	[fastalien], dword NONZERO		; Set fastalien flag
+		mov	[invaders], dword 2
+		mov	[aliencounter], dword 2
+		jmp	.positionalien
 .fouraliens:	mov	[invaders], dword 4			; Spawn three aliens
 		mov	[aliencounter], dword 4			; Set loop control
 		jmp	.positionalien				; Jump to position aliens
@@ -1358,10 +1443,14 @@ collcheck1:	call	lasercheck
 		jnz	.shipflashing				; If so, don't move the aliens
 		
 ; Check if it's time for the aliens to move forward (based on timer)	
-.advancecheck:	cmp	[alienspdctl], byte ALIENSPEED		; Check if the aliens should advance or wait for another 
-								; signal alarm from the operating system (this paces the attack)
+.advancecheck:	cmp	[fastalien], byte NULL			; Is it a fast alien?
+		jnz	.fast					; If so, increase speed of advancing aliens
+		cmp	[alienspdctl], byte ALIENSPEED1		; Otherwise, use normal speed
+		jl	.finishalien				; Check if the aliens should advance or wait 
+		jmp	.proceed
+.fast		cmp	[alienspdctl], byte ALIENSPEED2		; signal alarm from the operating system (this paces the attack)
 		jl	.finishalien				; If not, skip the routine and increment alienspdctl
-								; Otherwise, continue
+.proceed:							; Otherwise, continue
 		mov	byte [alienspdctl], 0			; Time for alien to move forward. Reset alienspdctl to zero.
 		mov	ecx, [aliencounter]			; Process # of aliens created
 .advancealien	mov	ebx, alien				; Copy address of alien into EDX
